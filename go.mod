@@ -2,7 +2,10 @@ module github.com/pthethanh/spider
 
 go 1.26
 
-require github.com/go-rod/rod v0.116.2
+require (
+	github.com/go-rod/rod v0.116.2
+	golang.org/x/net v0.55.0
+)
 
 require (
 	github.com/ysmood/fetchup v0.2.3 // indirect
