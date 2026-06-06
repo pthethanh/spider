@@ -3,12 +3,12 @@ module github.com/pthethanh/spider
 go 1.26
 
 require (
+	codeberg.org/readeck/go-readability/v2 v2.1.1
 	github.com/go-rod/rod v0.116.2
 	golang.org/x/net v0.55.0
 )
 
 require (
-	codeberg.org/readeck/go-readability/v2 v2.1.1 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
 	github.com/go-shiori/dom v0.0.0-20230515143342-73569d674e1c // indirect
