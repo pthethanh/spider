@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -12,12 +10,12 @@ import (
 	"github.com/pthethanh/spider/spider"
 )
 
+var log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
 func main() {
 	url := flag.String("url", "https://example.com", "URL to fetch")
 	count := flag.Int("count", 100, "Number of times to fetch the URL")
 	flag.Parse()
-
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	client, err := spider.New(spider.WithLogger(log))
 	if err != nil {
@@ -31,44 +29,40 @@ func main() {
 	ctx := context.Background()
 
 	for i := 0; i < *count; i++ {
-		fmt.Printf("\n─── %s ───\n", *url)
+		log.Info("Fetching URL", "url", *url)
 		demo(ctx, client, *url)
 		time.Sleep(5 * time.Second)
 	}
 }
 
-func demo(ctx context.Context, client *spider.Client, url string) {
-	result, err := client.Fetch(ctx, url)
+func demo(ctx context.Context, client *spider.Client, uri string) {
+	result, err := client.Fetch(ctx, uri)
 	if err != nil {
-		fmt.Printf("  ERROR: %v\n", err)
+		log.Error("Failed to fetch URL", "url", uri, "err", err)
 		return
 	}
 
-	body, _ := io.ReadAll(result.Body)
 	f, err := os.Create("demo_output.html")
 	if err != nil {
-		fmt.Printf("  ERROR: %v\n", err)
+		log.Error("Failed to create output file", "err", err)
 		return
 	}
 	defer f.Close()
-	f.Write(body)
-
-	fmt.Printf("  method   : %s\n", result.Method)
-	fmt.Printf("  bytes    : %d\n", len(body))
+	if _, err := f.Write(result.Body); err != nil {
+		log.Error("Failed to copy to output file", "err", err)
+	}
+	log.Info("Fetch completed", "method", result.Method, "bytes", len(result.Body))
 
 	if result.Score != nil {
-		fmt.Printf("  score    : %.2f  confidence=%s  recommended=%s\n",
-			result.Score.Score, result.Score.Confidence, result.Score.Recommended)
-		fmt.Printf("  reason   : %s\n", result.Score.Reason)
+		log.Info("Score available", "score", result.Score.Score, "confidence", result.Score.Confidence, "recommended", result.Score.Recommended)
+		log.Info("Reason", "reason", result.Score.Reason)
 	} else {
-		fmt.Printf("  score    : (no cached score yet – basic running inline)\n")
+		log.Info("No cached score available", "url", uri)
 	}
 
 	// After Fetch, the inline basic result is already stored.
 	// Check what we know now:
-	if q, ok := client.ScoreFor(url); ok {
-		fmt.Printf("  updated  : score=%.2f tier=%d needs_upgrade=%v recommended=%s\n\n",
-			q.Score, q.Tier, q.NeedsUpgrade(), q.Recommended)
+	if q, ok := client.ScoreFor(uri); ok {
+		log.Info("Updated score available", "score", q.Score, "tier", q.Tier, "needs_upgrade", q.NeedsUpgrade(), "recommended", q.Recommended)
 	}
-
 }

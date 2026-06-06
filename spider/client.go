@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/readeck/go-readability/v2"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
@@ -18,7 +19,7 @@ import (
 
 // FetchResult bundles the fetched content with metadata about how it was obtained.
 type FetchResult struct {
-	Body     io.Reader
+	Body     []byte
 	Method   FetchMethod    // method actually used for this fetch
 	Score    *QualityResult // best known cached score (nil on first-ever visit)
 	Endpoint string
@@ -173,7 +174,7 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 	}
 
 	return &FetchResult{
-		Body:     bytes.NewReader(rawBody),
+		Body:     rawBody,
 		Method:   method,
 		Score:    score,
 		Endpoint: endpoint,
@@ -181,35 +182,31 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 }
 
 // GetHTML performs a plain HTTP GET, buffers and returns the body.
-func (c *Client) GetHTML(ctx context.Context, endpoint string) (io.Reader, error) {
+func (c *Client) GetHTML(ctx context.Context, endpoint string) ([]byte, error) {
 	data, err := c.FetchRaw(ctx, endpoint, MethodHTTP)
 	if err != nil {
 		return nil, err
 	}
-	return bytes.NewReader(data), nil
+	return data, nil
 }
 
 // GetHTMLWithBrowser fetches via headless browser, buffers and returns the body.
-func (c *Client) GetHTMLWithBrowser(ctx context.Context, endpoint string) (io.Reader, error) {
+func (c *Client) GetHTMLWithBrowser(ctx context.Context, endpoint string) ([]byte, error) {
 	data, err := c.FetchRaw(ctx, endpoint, MethodBrowser)
 	if err != nil {
 		return nil, err
 	}
-	return bytes.NewReader(data), nil
+	return data, nil
 }
 
 // GetJSON is an alias for GetHTML – useful for JSON API endpoints.
-func (c *Client) GetJSON(ctx context.Context, endpoint string) (io.Reader, error) {
+func (c *Client) GetJSON(ctx context.Context, endpoint string) ([]byte, error) {
 	return c.GetHTML(ctx, endpoint)
 }
 
 // CheckQuality scores a pre-fetched HTML body using the BasicChecker.
-func (c *Client) CheckQuality(ctx context.Context, body io.Reader) (QualityResult, error) {
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return QualityResult{}, fmt.Errorf("read body: %w", err)
-	}
-	return c.checker.Check(ctx, string(data))
+func (c *Client) CheckQuality(ctx context.Context, body []byte) (QualityResult, error) {
+	return c.checker.Check(ctx, string(body))
 }
 
 // ScoreFor returns the best known cached quality result for a URL's host.
@@ -230,12 +227,19 @@ func (c *Client) Close() error {
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 func (c *Client) FetchRaw(ctx context.Context, endpoint string, method FetchMethod) ([]byte, error) {
+	var data []byte
+	var err error
 	switch method {
 	case MethodBrowser:
-		return c.browserFetch(ctx, endpoint)
+		data, err = c.browserFetch(ctx, endpoint)
 	default:
-		return c.httpFetch(ctx, endpoint)
+		data, err = c.httpFetch(ctx, endpoint)
 	}
+	rs := new(bytes.Buffer)
+	if err = c.RenderReadableHTML(rs, data); err != nil {
+		return nil, err
+	}
+	return rs.Bytes(), nil
 }
 
 func (c *Client) httpFetch(ctx context.Context, endpoint string) ([]byte, error) {
@@ -309,4 +313,20 @@ func (c *Client) closeBrowser() error {
 		c.browser = nil
 	}
 	return nil
+}
+
+func (c *Client) RenderReadableText(w io.Writer, body []byte) error {
+	article, err := readability.FromReader(bytes.NewReader(body), nil)
+	if err != nil {
+		return fmt.Errorf("parse article: %w", err)
+	}
+	return article.RenderText(w)
+}
+
+func (c *Client) RenderReadableHTML(w io.Writer, body []byte) error {
+	article, err := readability.FromReader(bytes.NewReader(body), nil)
+	if err != nil {
+		return fmt.Errorf("parse article: %w", err)
+	}
+	return article.RenderHTML(w)
 }
