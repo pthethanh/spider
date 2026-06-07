@@ -46,8 +46,8 @@ type llmVerdict struct {
 	Recommended string   `json:"recommended"` // "http" | "browser"
 }
 
-func (l *LLMChecker) Check(ctx context.Context, rawHTML string) (QualityResult, error) {
-	snippet := rawHTML
+func (l *LLMChecker) Check(ctx context.Context, rs *FetchResult) (QualityResult, error) {
+	snippet := string(rs.RawBody)
 	if len(snippet) > llmSnippetBytes {
 		snippet = snippet[:llmSnippetBytes]
 	}

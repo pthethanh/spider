@@ -48,10 +48,10 @@ func demo(ctx context.Context, client *spider.Client, uri string) {
 		return
 	}
 	defer f.Close()
-	if _, err := f.Write(result.Body); err != nil {
+	if _, err := f.Write(result.ReadableBody); err != nil {
 		log.Error("Failed to copy to output file", "err", err)
 	}
-	log.Info("Fetch completed", "method", result.Method, "bytes", len(result.Body))
+	log.Info("Fetch completed", "method", result.Method, "bytes", len(result.ReadableBody))
 
 	if result.Score != nil {
 		log.Info("Score available", "score", result.Score.Score, "confidence", result.Score.Confidence, "recommended", result.Score.Recommended)

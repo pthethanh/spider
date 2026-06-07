@@ -20,10 +20,10 @@ func (b *BasicChecker) Tier() Tier {
 
 func (b *BasicChecker) Check(
 	_ context.Context,
-	rawHTML string,
+	rs *FetchResult,
 ) (QualityResult, error) {
 
-	lower := strings.ToLower(rawHTML)
+	lower := strings.ToLower(string(rs.RawBody))
 
 	signals := make(map[string]float64)
 	var reasons []string
@@ -32,7 +32,7 @@ func (b *BasicChecker) Check(
 	// Extract visible text
 	// ---------------------------------------------------------
 
-	visibleText := extractVisibleText(rawHTML)
+	visibleText := extractVisibleText(string(rs.RawBody))
 	visibleTextLower := strings.ToLower(visibleText)
 
 	textLen := len(visibleTextLower)
@@ -42,13 +42,13 @@ func (b *BasicChecker) Check(
 	// ---------------------------------------------------------
 
 	signals["content_length"] =
-		math.Min(float64(len(rawHTML))/30000.0, 1.0)
+		math.Min(float64(len(string(rs.RawBody)))/30000.0, 1.0)
 
 	signals["visible_text_length"] =
 		math.Min(float64(textLen)/3000.0, 1.0)
 
 	signals["text_ratio"] =
-		visibleTextRatio(rawHTML)
+		visibleTextRatio(string(rs.RawBody))
 
 	signals["text_diversity"] =
 		lexicalDiversity(visibleText)

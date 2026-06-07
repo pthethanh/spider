@@ -8,9 +8,8 @@ import (
 
 // upgradeJob is a request to re-score a host using a higher-tier checker.
 type upgradeJob struct {
-	host     string
-	rawHTML  string
-	fromTier Tier
+	fetchResult *FetchResult
+	fromTier    Tier
 }
 
 // Pipeline manages a pool of background workers that run higher-tier
@@ -39,8 +38,8 @@ func NewPipeline(store *ScoreStore, checkers []Checker, workers int, log *slog.L
 
 // Enqueue submits a non-blocking background upgrade for the given host.
 // It schedules all checkers with a tier strictly above fromTier.
-func (p *Pipeline) Enqueue(host, rawHTML string, fromTier Tier) {
-	job := upgradeJob{host: host, rawHTML: rawHTML, fromTier: fromTier}
+func (p *Pipeline) Enqueue(host string, rs *FetchResult, fromTier Tier) {
+	job := upgradeJob{fetchResult: rs, fromTier: fromTier}
 	select {
 	case p.jobs <- job:
 	default:
@@ -67,14 +66,14 @@ func (p *Pipeline) process(job upgradeJob) {
 		if checker.Tier() <= job.fromTier {
 			continue // skip tiers we've already done
 		}
-		result, err := checker.Check(ctx, job.rawHTML)
+		result, err := checker.Check(ctx, job.fetchResult)
 		if err != nil {
-			p.log.Error("checker failed", "tier", checker.Tier(), "host", job.host, "err", err)
+			p.log.Error("checker failed", "tier", checker.Tier(), "host", job.fetchResult.Endpoint, "err", err)
 			continue
 		}
-		p.store.Update(job.host, result)
+		p.store.Update(job.fetchResult.Endpoint, result)
 		p.log.Info("score updated",
-			"host", job.host,
+			"host", job.fetchResult.Endpoint,
 			"tier", checker.Tier(),
 			"score", result.Score,
 			"recommended", result.Recommended,

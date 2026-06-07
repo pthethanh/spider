@@ -19,10 +19,11 @@ import (
 
 // FetchResult bundles the fetched content with metadata about how it was obtained.
 type FetchResult struct {
-	Body     []byte
-	Method   FetchMethod    // method actually used for this fetch
-	Score    *QualityResult // best known cached score (nil on first-ever visit)
-	Endpoint string
+	ReadableBody []byte
+	RawBody      []byte
+	Method       FetchMethod    // method actually used for this fetch
+	Score        *QualityResult // best known cached score (nil on first-ever visit)
+	Endpoint     string
 }
 
 // Client is the main spider entry point. It selects fetch strategies
@@ -126,11 +127,11 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 	}
 
 	// 3. Fetch.
-	rawBody, err := c.FetchRaw(ctx, endpoint, method)
+	rs, err := c.FetchRaw(ctx, endpoint, method)
 	if err != nil {
 		if method == MethodHTTP {
 			c.log.Warn("HTTP failed, falling back to browser", "endpoint", endpoint, "err", err)
-			rawBody, err = c.FetchRaw(ctx, endpoint, MethodBrowser)
+			rs, err = c.FetchRaw(ctx, endpoint, MethodBrowser)
 			if err != nil {
 				return nil, fmt.Errorf("both HTTP and browser failed for %s: %w", endpoint, err)
 			}
@@ -140,14 +141,14 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 		}
 	}
 
-	basicResult, checkErr := c.checker.Check(ctx, string(rawBody))
+	basicResult, checkErr := c.checker.Check(ctx, rs)
 	if checkErr != nil {
 		c.log.Warn("checker error", "err", checkErr)
 	}
 	c.store.Update(host, basicResult)
 	if basicResult.NeedsUpgrade() {
 		// Fire-and-forget: does not block Fetch.
-		c.pipeline.Enqueue(host, string(rawBody), TierBasic)
+		c.pipeline.Enqueue(host, rs, TierBasic)
 	}
 	c.log.Info("fetch completed",
 		"endpoint", endpoint,
@@ -174,15 +175,16 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 	}
 
 	return &FetchResult{
-		Body:     rawBody,
-		Method:   method,
-		Score:    score,
-		Endpoint: endpoint,
+		ReadableBody: rs.ReadableBody,
+		RawBody:      rs.RawBody,
+		Method:       method,
+		Score:        score,
+		Endpoint:     endpoint,
 	}, nil
 }
 
 // GetHTML performs a plain HTTP GET, buffers and returns the body.
-func (c *Client) GetHTML(ctx context.Context, endpoint string) ([]byte, error) {
+func (c *Client) GetHTML(ctx context.Context, endpoint string) (*FetchResult, error) {
 	data, err := c.FetchRaw(ctx, endpoint, MethodHTTP)
 	if err != nil {
 		return nil, err
@@ -191,7 +193,7 @@ func (c *Client) GetHTML(ctx context.Context, endpoint string) ([]byte, error) {
 }
 
 // GetHTMLWithBrowser fetches via headless browser, buffers and returns the body.
-func (c *Client) GetHTMLWithBrowser(ctx context.Context, endpoint string) ([]byte, error) {
+func (c *Client) getHTMLWithBrowser(ctx context.Context, endpoint string) (*FetchResult, error) {
 	data, err := c.FetchRaw(ctx, endpoint, MethodBrowser)
 	if err != nil {
 		return nil, err
@@ -201,12 +203,16 @@ func (c *Client) GetHTMLWithBrowser(ctx context.Context, endpoint string) ([]byt
 
 // GetJSON is an alias for GetHTML – useful for JSON API endpoints.
 func (c *Client) GetJSON(ctx context.Context, endpoint string) ([]byte, error) {
-	return c.GetHTML(ctx, endpoint)
+	rs, err := c.GetHTML(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return rs.RawBody, nil
 }
 
 // CheckQuality scores a pre-fetched HTML body using the BasicChecker.
-func (c *Client) CheckQuality(ctx context.Context, body []byte) (QualityResult, error) {
-	return c.checker.Check(ctx, string(body))
+func (c *Client) CheckQuality(ctx context.Context, rs *FetchResult) (QualityResult, error) {
+	return c.checker.Check(ctx, rs)
 }
 
 // ScoreFor returns the best known cached quality result for a URL's host.
@@ -226,7 +232,7 @@ func (c *Client) Close() error {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-func (c *Client) FetchRaw(ctx context.Context, endpoint string, method FetchMethod) ([]byte, error) {
+func (c *Client) FetchRaw(ctx context.Context, endpoint string, method FetchMethod) (*FetchResult, error) {
 	var data []byte
 	var err error
 	switch method {
@@ -239,7 +245,13 @@ func (c *Client) FetchRaw(ctx context.Context, endpoint string, method FetchMeth
 	if err = c.RenderReadableHTML(rs, data); err != nil {
 		return nil, err
 	}
-	return rs.Bytes(), nil
+	return &FetchResult{
+		ReadableBody: rs.Bytes(),
+		RawBody:      data,
+		Method:       method,
+		Endpoint:     endpoint,
+		Score:        nil, // caller will call CheckQuality separately and update store
+	}, nil
 }
 
 func (c *Client) httpFetch(ctx context.Context, endpoint string) ([]byte, error) {

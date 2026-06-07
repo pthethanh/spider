@@ -55,12 +55,12 @@ func (c Confidence) String() string {
 
 // QualityResult is the unified output of every quality checker.
 type QualityResult struct {
-	Score      float64            // 0.0 (unusable) – 1.0 (perfect)
-	Confidence Confidence         // how certain the checker is
-	Signals    map[string]float64 // named signal contributions
-	Recommended FetchMethod       // which fetch strategy to use next time
-	Reason     string             // human-readable summary
-	Tier       Tier               // which checker produced this
+	Score       float64            // 0.0 (unusable) – 1.0 (perfect)
+	Confidence  Confidence         // how certain the checker is
+	Signals     map[string]float64 // named signal contributions
+	Recommended FetchMethod        // which fetch strategy to use next time
+	Reason      string             // human-readable summary
+	Tier        Tier               // which checker produced this
 }
 
 // NeedsUpgrade returns true when the result is uncertain enough
@@ -72,7 +72,7 @@ func (q QualityResult) NeedsUpgrade() bool {
 // Checker is the universal interface every quality strategy must satisfy.
 type Checker interface {
 	// Check analyses the raw HTML and returns a quality verdict.
-	Check(ctx context.Context, rawHTML string) (QualityResult, error)
+	Check(ctx context.Context, rs *FetchResult) (QualityResult, error)
 	// Tier returns the sophistication level of this checker.
 	Tier() Tier
 }

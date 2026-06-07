@@ -47,7 +47,7 @@ type Prober struct {
 
 // rawFetcher is the minimal interface the Prober needs from the Client.
 type rawFetcher interface {
-	FetchRaw(ctx context.Context, url string, method FetchMethod) ([]byte, error)
+	FetchRaw(ctx context.Context, url string, method FetchMethod) (*FetchResult, error)
 }
 
 func NewProber(c *Client) *Prober {
@@ -113,7 +113,7 @@ func (p *Prober) probe(c ProbeCandidate) {
 	p.log.Info("probing host with HTTP", "host", c.Host, "url", c.LastURL)
 
 	// Fetch via plain HTTP.
-	body, err := p.fetcher.FetchRaw(ctx, c.LastURL, MethodHTTP)
+	rs, err := p.fetcher.FetchRaw(ctx, c.LastURL, MethodHTTP)
 	if err != nil {
 		p.log.Warn("probe HTTP fetch failed", "host", c.Host, "err", err)
 		p.store.RecordProbeResult(c.Host, false, p.cfg.InitialProbeInterval)
@@ -122,7 +122,7 @@ func (p *Prober) probe(c ProbeCandidate) {
 	}
 
 	// Score with the best available checker.
-	result, err := p.bestChecker().Check(ctx, string(body))
+	result, err := p.bestChecker().Check(ctx, rs)
 	if err != nil {
 		p.log.Warn("probe checker failed", "host", c.Host, "err", err)
 		p.store.RecordProbeResult(c.Host, false, p.cfg.InitialProbeInterval)

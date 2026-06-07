@@ -18,17 +18,17 @@ func NewAdvancedChecker() *AdvancedChecker { return &AdvancedChecker{} }
 
 func (a *AdvancedChecker) Tier() Tier { return TierAdvanced }
 
-func (a *AdvancedChecker) Check(_ context.Context, rawHTML string) (QualityResult, error) {
+func (a *AdvancedChecker) Check(_ context.Context, rs *FetchResult) (QualityResult, error) {
 	signals := make(map[string]float64)
-	lower := strings.ToLower(rawHTML)
+	lower := strings.ToLower(string(rs.RawBody))
 
 	// -- inherit basic signals --
-	lenScore := math.Min(float64(len(rawHTML))/51200.0, 1.0)
+	lenScore := math.Min(float64(len(string(rs.RawBody)))/51200.0, 1.0)
 	signals["content_length"] = lenScore
-	signals["text_ratio"] = visibleTextRatio(rawHTML)
+	signals["text_ratio"] = visibleTextRatio(string(rs.RawBody))
 
 	// 1. Word count of visible text.
-	visText := extractVisibleText(rawHTML)
+	visText := extractVisibleText(string(rs.RawBody))
 	words := strings.Fields(visText)
 	signals["word_count"] = math.Min(float64(len(words))/500.0, 1.0)
 
@@ -51,7 +51,7 @@ func (a *AdvancedChecker) Check(_ context.Context, rawHTML string) (QualityResul
 	}
 
 	// 4. <noscript> with meaningful content → strong JS-wall signal.
-	noscriptScore := noscriptSignal(rawHTML)
+	noscriptScore := noscriptSignal(string(rs.RawBody))
 	signals["noscript_signal"] = -noscriptScore
 
 	// 5. Heading hierarchy quality.
@@ -75,14 +75,14 @@ func (a *AdvancedChecker) Check(_ context.Context, rawHTML string) (QualityResul
 
 	// Weighted combination.
 	weights := map[string]float64{
-		"content_length":      0.15,
-		"text_ratio":          0.20,
-		"word_count":          0.20,
+		"content_length":       0.15,
+		"text_ratio":           0.20,
+		"word_count":           0.20,
 		"link_density_penalty": 1.00,
-		"noindex_penalty":     1.00,
-		"noscript_signal":     1.00,
-		"heading_quality":     0.10,
-		"metadata_richness":   0.10,
+		"noindex_penalty":      1.00,
+		"noscript_signal":      1.00,
+		"heading_quality":      0.10,
+		"metadata_richness":    0.10,
 	}
 
 	var score float64

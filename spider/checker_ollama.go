@@ -76,8 +76,8 @@ type ollamaResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func (o *OllamaChecker) Check(ctx context.Context, rawHTML string) (QualityResult, error) {
-	snippet := rawHTML
+func (o *OllamaChecker) Check(ctx context.Context, rs *FetchResult) (QualityResult, error) {
+	snippet := string(rs.RawBody)
 	if len(snippet) > llmSnippetBytes {
 		snippet = snippet[:llmSnippetBytes]
 	}
