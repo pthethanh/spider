@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/pthethanh/spider/spider"
+	"github.com/pthethanh/spider"
 )
 
 var log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))

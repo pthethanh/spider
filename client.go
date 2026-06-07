@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,7 +95,7 @@ func New(options ...Option) (*Client, error) {
 		checker:    NewBasicChecker(),
 		store:      NewScoreStore(),
 	}
-	c.pipeline = NewPipeline(c.store, []Checker{NewAdvancedChecker()}, 4, c.log)
+	c.pipeline = NewPipeline(c.store, []Checker{NewBasicChecker()}, 5, c.log)
 	for _, opt := range options {
 		opt(c)
 	}
@@ -287,9 +288,12 @@ func (c *Client) browserFetch(ctx context.Context, endpoint string) ([]byte, err
 	if err = page.Context(ctx).Navigate(endpoint); err != nil {
 		return nil, fmt.Errorf("navigate to %s: %w", endpoint, err)
 	}
+	prePageLoadSetup(endpoint, page)
 	if err = page.Context(ctx).WaitLoad(); err != nil {
 		return nil, fmt.Errorf("wait load at %s: %w", endpoint, err)
 	}
+	postPageLoadSetup(page)
+
 	htmlStr, err := page.HTML()
 	if err != nil {
 		return nil, fmt.Errorf("read HTML from %s: %w", endpoint, err)
@@ -307,6 +311,9 @@ func (c *Client) getBrowser() (*rod.Browser, error) {
 		Headless(true).
 		Set("disable-gpu").
 		Set("no-sandbox").
+		Set("disable-blink-features", "AutomationControlled").
+		Set("window-size", "1920,1080").
+		Set("lang", "en-US,en").
 		Launch()
 	if err != nil {
 		return nil, fmt.Errorf("launch browser: %w", err)
@@ -341,4 +348,124 @@ func (c *Client) RenderReadableHTML(w io.Writer, body []byte) error {
 		return fmt.Errorf("parse article: %w", err)
 	}
 	return article.RenderHTML(w)
+}
+
+func prePageLoadSetup(endpoint string, page *rod.Page) {
+	page.MustEval(`
+() => {
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+    })
+}
+`)
+	page.MustSetCookies(
+		&proto.NetworkCookieParam{
+			Name:   "cookie_consent",
+			Value:  "accepted",
+			Domain: endpoint,
+			Path:   "/",
+		},
+	)
+}
+
+func postPageLoadSetup(page *rod.Page) {
+	// accept consent popups if any - best effort, we don't want them to interfere with readability parsing and quality checks
+	texts := []string{
+		"accept",
+		"accept all",
+		"i agree",
+		"agree",
+		"allow all",
+		"got it",
+		"continue",
+		"accept cookies",
+	}
+
+	buttons, _ := page.Elements("button")
+
+	for _, btn := range buttons {
+		txt, _ := btn.Text()
+		lower := strings.ToLower(strings.TrimSpace(txt))
+
+		for _, target := range texts {
+			if lower == target ||
+				strings.Contains(lower, target) {
+				_ = btn.Click(proto.InputMouseButtonLeft, 1)
+				return
+			}
+		}
+	}
+
+	// remove popup	elements that might interfere with readability parsing and quality checks - best effort, we don't want them to interfere if they are not popups
+	page.MustEval(`
+() => {
+    const selectors = [
+        '#onetrust-banner-sdk',
+        '#onetrust-consent-sdk',
+        '#CybotCookiebotDialog',
+        '#didomi-host',
+        '#qc-cmp2-container',
+        '#sp_message_container',
+        '.cookie-banner',
+        '.cookie-consent',
+        '.consent-banner',
+        '.modal',
+        '.overlay',
+        '[aria-modal="true"]'
+    ];
+
+    selectors.forEach(selector => {
+        document.querySelectorAll(selector).forEach(el => el.remove());
+    });
+}
+`)
+	// remove fullscreen overlays
+	page.MustEval(`
+() => {
+    document.querySelectorAll('*').forEach(el => {
+        const style = getComputedStyle(el);
+
+        const fixed =
+            style.position === 'fixed' ||
+            style.position === 'sticky';
+
+        const huge =
+            el.offsetWidth > window.innerWidth * 0.8 &&
+            el.offsetHeight > window.innerHeight * 0.3;
+
+        if (fixed && huge) {
+            el.remove();
+        }
+    });
+}
+`)
+	// restore scrolling in case it was blocked by an overlay
+	page.MustEval(`
+() => {
+    document.body.style.overflow = 'auto';
+    document.documentElement.style.overflow = 'auto';
+
+    document.body.classList.remove('modal-open');
+    document.documentElement.classList.remove('modal-open');
+}
+`)
+	// remove z-index monster
+	page.MustEval(`
+() => {
+    document.querySelectorAll('*').forEach(el => {
+        const z = parseInt(getComputedStyle(el).zIndex);
+
+        if (!isNaN(z) && z > 1000) {
+            const rect = el.getBoundingClientRect();
+
+            if (
+                rect.width > window.innerWidth * 0.5 &&
+                rect.height > window.innerHeight * 0.2
+            ) {
+                el.remove();
+            }
+        }
+    });
+}
+`)
 }
