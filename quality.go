@@ -10,15 +10,26 @@ import (
 )
 
 // Tier represents the sophistication level of a quality checker.
+// Higher tiers are more accurate but slower and more expensive.
 type Tier int
 
 const (
-	TierBasic    Tier = iota // fast heuristic, runs inline
-	TierAdvanced             // smarter heuristic, runs in background
-	TierLLM                  // LLM-based, runs in background
+	TierBasic Tier = iota // fast heuristic, runs inline with every Fetch
+	TierLLM               // LLM-based, runs in a background pipeline worker
 )
 
-// FetchMethod is the recommended crawl strategy.
+func (t Tier) String() string {
+	switch t {
+	case TierBasic:
+		return "basic"
+	case TierLLM:
+		return "llm"
+	default:
+		return "unknown"
+	}
+}
+
+// FetchMethod is the recommended crawl strategy for a host.
 type FetchMethod int
 
 const (
@@ -57,29 +68,43 @@ func (c Confidence) String() string {
 type QualityResult struct {
 	Score       float64            // 0.0 (unusable) – 1.0 (perfect)
 	Confidence  Confidence         // how certain the checker is
-	Signals     map[string]float64 // named signal contributions
+	Signals     map[string]float64 // named signal contributions for debugging
 	Recommended FetchMethod        // which fetch strategy to use next time
 	Reason      string             // human-readable summary
 	Tier        Tier               // which checker produced this
 }
 
-// NeedsUpgrade returns true when the result is uncertain enough
-// to warrant a background upgrade to a higher-tier checker.
+// NeedsUpgrade returns true when the result is uncertain enough to warrant
+// a background upgrade to a higher-tier checker.
 func (q QualityResult) NeedsUpgrade() bool {
 	return q.Confidence == ConfidenceLow || (q.Score > 0.35 && q.Score < 0.65)
 }
 
 // Checker is the universal interface every quality strategy must satisfy.
 type Checker interface {
-	// Check analyses the raw HTML and returns a quality verdict.
+	// Check analyses the fetch result and returns a quality verdict.
 	Check(ctx context.Context, rs *FetchResult) (QualityResult, error)
 	// Tier returns the sophistication level of this checker.
 	Tier() Tier
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
+// ─── shared helpers ───────────────────────────────────────────────────────────
 
 func clamp(v float64) float64 { return math.Max(0, math.Min(v, 1.0)) }
+
+// confidenceFromScore maps the distance from the 0.5 decision boundary to
+// a Confidence level. The further the score from 0.5, the more certain we are.
+func confidenceFromScore(score float64) Confidence {
+	dist := math.Abs(score - 0.5)
+	switch {
+	case dist >= 0.35:
+		return ConfidenceHigh
+	case dist >= 0.15:
+		return ConfidenceMedium
+	default:
+		return ConfidenceLow
+	}
+}
 
 // confidenceFromWindow grows with how full the observation window is.
 // A thin window (few observations) is inherently less trustworthy.
@@ -95,6 +120,8 @@ func confidenceFromWindow(n, max int) Confidence {
 	}
 }
 
+// extractVisibleText walks the HTML parse tree and concatenates all text
+// nodes that are not inside <script>, <style>, <noscript>, or <head>.
 func extractVisibleText(s string) string {
 	doc, err := html.Parse(strings.NewReader(s))
 	if err != nil {
@@ -124,10 +151,24 @@ func extractVisibleText(s string) string {
 	return b.String()
 }
 
+// visibleTextRatio returns the fraction of the raw HTML that is visible text.
 func visibleTextRatio(rawHTML string) float64 {
 	if len(rawHTML) == 0 {
 		return 0
 	}
 	text := extractVisibleText(rawHTML)
 	return clamp(float64(utf8.RuneCountInString(text)) / float64(len(rawHTML)))
+}
+
+func describeScore(score float64) string {
+	switch {
+	case score >= 0.8:
+		return "excellent – plain HTTP sufficient"
+	case score >= 0.6:
+		return "good – plain HTTP likely sufficient"
+	case score >= 0.4:
+		return "mediocre – consider headless browser"
+	default:
+		return "poor – headless browser recommended"
+	}
 }

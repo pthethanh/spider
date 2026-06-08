@@ -414,29 +414,3 @@ func noscriptSignal(rawHTML string) float64 {
 	walk(doc)
 	return penalty
 }
-
-// confidenceFromScore maps score distance from 0.5 to confidence.
-func confidenceFromScore(score float64) Confidence {
-	dist := math.Abs(score - 0.5)
-	switch {
-	case dist >= 0.35:
-		return ConfidenceHigh
-	case dist >= 0.15:
-		return ConfidenceMedium
-	default:
-		return ConfidenceLow
-	}
-}
-
-func describeScore(score float64) string {
-	switch {
-	case score >= 0.8:
-		return "excellent – plain HTTP sufficient"
-	case score >= 0.6:
-		return "good – plain HTTP likely sufficient"
-	case score >= 0.4:
-		return "mediocre – consider headless browser"
-	default:
-		return "poor – headless browser recommended"
-	}
-}

@@ -15,66 +15,63 @@ type scoreObservation struct {
 }
 
 // scoreEntry holds a sliding time-window of observations for one host.
-// The merged score is a time-decayed weighted average: recent observations
-// carry exponentially more weight than older ones, so a transient bad result
-// (e.g. a temporary JS error or a rate-limit page) fades out naturally
-// instead of poisoning the cache for the full TTL.
+//
+// The merged score is a time-decayed, tier-weighted average. Recent and
+// higher-tier observations carry exponentially more weight, so:
+//   - A fresh LLM verdict immediately dominates routing decisions.
+//   - A transient bad basic result is diluted by older good observations.
+//   - A site that fixes its JS rendering is de-escalated within one half-life.
 type scoreEntry struct {
 	observations []scoreObservation
-	maxWindow    int           // hard cap on number of stored observations
-	windowTTL    time.Duration // observations older than this are evicted
-	halfLife     time.Duration // observation weight halves every halfLife
+	maxWindow    int
+	windowTTL    time.Duration
+	halfLife     time.Duration
 
 	// de-escalation probe state
-	nextProbeAt     time.Time     // when to next try a cheaper method
-	probeInterval   time.Duration // current interval (grows on failed probes)
-	consecutiveFail int           // how many probes in a row stayed on browser
-	lastURL         string        // most recently fetched URL for this host
+	nextProbeAt     time.Time
+	probeInterval   time.Duration
+	consecutiveFail int
+	lastURL         string // most recently fetched URL for this host
 }
 
-// add appends a new observation and evicts stale / excess ones.
+// add appends a new observation and evicts stale/excess ones.
 func (e *scoreEntry) add(r QualityResult) {
 	now := time.Now()
 	e.observations = append(e.observations, scoreObservation{
 		result:     r,
 		recordedAt: now,
 	})
+	e.evict(now)
+}
 
-	// Evict observations beyond the TTL window.
+// evict removes observations that are older than windowTTL or exceed maxWindow.
+func (e *scoreEntry) evict(now time.Time) {
 	cutoff := now.Add(-e.windowTTL)
 	start := 0
 	for start < len(e.observations) && e.observations[start].recordedAt.Before(cutoff) {
 		start++
 	}
 	e.observations = e.observations[start:]
-
-	// Cap to maxWindow, keeping the most recent.
 	if len(e.observations) > e.maxWindow {
 		e.observations = e.observations[len(e.observations)-e.maxWindow:]
 	}
 }
 
 // tierMultiplier gives higher-tier checkers more authority in the weighted avg.
-// Basic=1, Advanced=2, LLM=4 — an LLM observation counts 4× a basic one
-// before time-decay is applied, so it dominates routing until it ages out.
+//
+//	Basic=1×, LLM=2× (before time-decay).
 func tierMultiplier(t Tier) float64 {
-	return math.Pow(2, float64(t)) // Tier0→1, Tier1→2, Tier2→4
+	return math.Pow(2, float64(t))
 }
 
 // merged computes a time-decayed, tier-weighted average across the window.
 //
 // Each observation's effective weight is:
 //
-//	w_i = tierMultiplier(tier_i) × exp(-λ × age_i)
+//	w_i = tierMultiplier(tier_i) × exp(−λ × age_i)
 //
-// This means:
-//   - A fresh LLM verdict dominates routing immediately.
-//   - As it ages, its weight decays at the same rate as lower-tier ones,
-//     so the basic/advanced observations gradually regain influence.
-//   - A transient bad basic result is immediately diluted by older good ones.
-//
-// Recommended is also derived from the weighted vote, not just the top tier,
-// so if 10 recent basic checks say "http" they can out-vote one old LLM "browser".
+// The Recommended field is also derived from the weighted vote so that many
+// recent basic-tier HTTP results can eventually out-vote one old LLM browser result.
 func (e *scoreEntry) merged() QualityResult {
 	if len(e.observations) == 0 {
 		return QualityResult{}
@@ -83,8 +80,8 @@ func (e *scoreEntry) merged() QualityResult {
 	now := time.Now()
 	lambda := math.Log(2) / e.halfLife.Seconds()
 
-	var weightedScoreSum float64
-	var browserWeight, httpWeight float64 // weighted vote for Recommended
+	var weightedScore float64
+	var browserVote, httpVote float64
 	var totalWeight float64
 	highestTier := e.observations[0].result.Tier
 
@@ -92,23 +89,22 @@ func (e *scoreEntry) merged() QualityResult {
 		age := now.Sub(obs.recordedAt).Seconds()
 		w := tierMultiplier(obs.result.Tier) * math.Exp(-lambda*age)
 
-		weightedScoreSum += w * obs.result.Score
+		weightedScore += w * obs.result.Score
 		totalWeight += w
 
 		if obs.result.Recommended == MethodBrowser {
-			browserWeight += w
+			browserVote += w
 		} else {
-			httpWeight += w
+			httpVote += w
 		}
-
 		if obs.result.Tier > highestTier {
 			highestTier = obs.result.Tier
 		}
 	}
 
-	avgScore := weightedScoreSum / totalWeight
+	avgScore := weightedScore / totalWeight
 	recommended := MethodHTTP
-	if browserWeight > httpWeight {
+	if browserVote > httpVote {
 		recommended = MethodBrowser
 	}
 
@@ -118,49 +114,47 @@ func (e *scoreEntry) merged() QualityResult {
 		Recommended: recommended,
 		Tier:        highestTier,
 		Signals: map[string]float64{
-			"browser_weight": browserWeight,
-			"http_weight":    httpWeight,
+			"browser_vote":   browserVote,
+			"http_vote":      httpVote,
 			"total_weight":   totalWeight,
 			"n_observations": float64(len(e.observations)),
 		},
 		Reason: fmt.Sprintf(
-			"decayed-tier-avg score=%.2f n=%d hlf=%s rec=%s (browser_w=%.2f http_w=%.2f)",
-			avgScore, len(e.observations), e.halfLife, recommended, browserWeight, httpWeight,
+			"decayed-avg score=%.2f n=%d halflife=%s rec=%s",
+			avgScore, len(e.observations), e.halfLife, recommended,
 		),
 	}
 }
 
+// ─── ScoreStore ───────────────────────────────────────────────────────────────
+
 // ScoreStore is a thread-safe, per-host store of quality observations.
-// Each host maintains an independent sliding time-window; Get returns
-// the time-decayed weighted average across that window.
 type ScoreStore struct {
 	mu      sync.RWMutex
 	entries map[string]*scoreEntry
 
-	// window configuration (shared across all hosts)
+	// Window config shared across all hosts.
 	maxWindow int
 	windowTTL time.Duration
 	halfLife  time.Duration
 }
 
-// StoreOption configures the ScoreStore window behaviour.
+// StoreOption configures the ScoreStore.
 type StoreOption func(*ScoreStore)
 
-// WithMaxWindow sets the maximum number of observations kept per host.
-// Default: 20.
+// WithMaxWindow sets the maximum observations kept per host. Default: 20.
 func WithMaxWindow(n int) StoreOption {
 	return func(s *ScoreStore) { s.maxWindow = n }
 }
 
 // WithWindowTTL sets how long an individual observation is retained.
-// Default: 24h.
+// Default: 24 h.
 func WithWindowTTL(d time.Duration) StoreOption {
 	return func(s *ScoreStore) { s.windowTTL = d }
 }
 
-// WithHalfLife sets the half-life of observation weight decay.
-// A shorter half-life makes the store react faster to site changes.
-// Default: 4h  (an observation from 4h ago has half the weight of one from now).
+// WithHalfLife sets the exponential decay half-life. A shorter half-life
+// makes the store react faster to site changes. Default: 4 h.
 func WithHalfLife(d time.Duration) StoreOption {
 	return func(s *ScoreStore) { s.halfLife = d }
 }
@@ -179,38 +173,29 @@ func NewScoreStore(opts ...StoreOption) *ScoreStore {
 }
 
 // Get returns the merged (time-decayed) result for a host.
-// Returns false if no observations exist or all have expired.
+// Returns (zero, false) if no observations exist or all have expired.
 func (s *ScoreStore) Get(host string) (QualityResult, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	e, ok := s.entries[host]
+	s.mu.RUnlock()
 	if !ok || len(e.observations) == 0 {
 		return QualityResult{}, false
 	}
+	// merged() is read-only — safe outside the write lock.
 	return e.merged(), true
 }
 
-// Update adds a new observation for the host.
-// Unlike the old implementation, it never discards lower-tier results:
-// every observation contributes to the weighted average, so even a basic
-// heuristic reading adds signal to the window.
+// Update adds a new observation for the host. Every observation contributes
+// to the weighted average regardless of tier, so even basic heuristic
+// readings add signal to the window.
 func (s *ScoreStore) Update(host string, result QualityResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries[host]
-	if !ok {
-		e = &scoreEntry{
-			maxWindow: s.maxWindow,
-			windowTTL: s.windowTTL,
-			halfLife:  s.halfLife,
-		}
-		s.entries[host] = e
-	}
+	e := s.getOrCreate(host)
 	e.add(result)
 }
 
-// Delete removes all observations for a host (useful for testing or
-// manual cache invalidation).
+// Delete removes all observations for a host (manual cache invalidation).
 func (s *ScoreStore) Delete(host string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,15 +209,25 @@ func (s *ScoreStore) Len() int {
 	return len(s.entries)
 }
 
-// ProbeCandidate describes a host that is due for a de-escalation probe.
+// SetLastURL records the most recently fetched URL for a host so the
+// Prober knows what URL to re-probe.
+func (s *ScoreStore) SetLastURL(host, rawURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[host]; ok {
+		e.lastURL = rawURL
+	}
+}
+
+// ProbeCandidate describes a host due for a de-escalation probe.
 type ProbeCandidate struct {
 	Host          string
-	LastURL       string // most recent URL seen for this host
+	LastURL       string
 	CurrentMethod FetchMethod
 }
 
-// ProbeCandidates returns all hosts that are currently on Browser and whose
-// next probe time has passed. The caller (Prober) will attempt HTTP on each.
+// ProbeCandidates returns hosts that are on Browser and whose next probe
+// time has elapsed.
 func (s *ScoreStore) ProbeCandidates() []ProbeCandidate {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -242,8 +237,8 @@ func (s *ScoreStore) ProbeCandidates() []ProbeCandidate {
 		if len(e.observations) == 0 {
 			continue
 		}
-		merged := e.merged()
-		if merged.Recommended == MethodBrowser && now.After(e.nextProbeAt) {
+		m := e.merged()
+		if m.Recommended == MethodBrowser && now.After(e.nextProbeAt) {
 			out = append(out, ProbeCandidate{
 				Host:          host,
 				LastURL:       e.lastURL,
@@ -255,8 +250,8 @@ func (s *ScoreStore) ProbeCandidates() []ProbeCandidate {
 }
 
 // RecordProbeResult updates probe scheduling after a de-escalation attempt.
-//   - success=true  → HTTP was good enough; window is cleared and host demoted.
-//   - success=false → stay on browser; backoff nextProbeAt with a cap.
+//   - success=true  → clear observations so new HTTP results dominate quickly.
+//   - success=false → exponential backoff, capped at 24 h.
 func (s *ScoreStore) RecordProbeResult(host string, success bool, baseInterval time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -265,15 +260,17 @@ func (s *ScoreStore) RecordProbeResult(host string, success bool, baseInterval t
 		return
 	}
 	if success {
-		// Wipe old browser observations so the new HTTP results dominate quickly.
 		e.observations = nil
 		e.consecutiveFail = 0
 		e.probeInterval = baseInterval
-		e.nextProbeAt = time.Time{} // no probe needed until browser is chosen again
+		e.nextProbeAt = time.Time{}
 	} else {
 		e.consecutiveFail++
-		// Exponential backoff capped at 24 h.
-		backoff := baseInterval * time.Duration(1<<min(e.consecutiveFail, 5))
+		shift := e.consecutiveFail
+		if shift > 5 {
+			shift = 5
+		}
+		backoff := baseInterval * time.Duration(1<<shift)
 		if backoff > 24*time.Hour {
 			backoff = 24 * time.Hour
 		}
@@ -283,7 +280,7 @@ func (s *ScoreStore) RecordProbeResult(host string, success bool, baseInterval t
 }
 
 // ScheduleProbe sets the initial nextProbeAt for a host that just got
-// promoted to Browser. Called by the client after an escalation.
+// promoted to Browser. A no-op if a probe is already scheduled.
 func (s *ScoreStore) ScheduleProbe(host string, interval time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,28 +294,43 @@ func (s *ScoreStore) ScheduleProbe(host string, interval time.Duration) {
 	}
 }
 
-// SetLastURL records the most recently fetched URL for a host so the
-// prober knows what URL to re-probe.
-func (s *ScoreStore) SetLastURL(host, url string) {
+// Evict removes observations older than windowTTL from all entries.
+// Call periodically (e.g. in a housekeeping goroutine) to bound memory use.
+func (s *ScoreStore) Evict() {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[host]; ok {
-		e.lastURL = url
+	for host, e := range s.entries {
+		e.evict(now)
+		if len(e.observations) == 0 {
+			delete(s.entries, host)
+		}
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// getOrCreate returns the entry for host, creating it if absent.
+// Must be called with the write lock held.
+func (s *ScoreStore) getOrCreate(host string) *scoreEntry {
+	e, ok := s.entries[host]
+	if !ok {
+		e = &scoreEntry{
+			maxWindow: s.maxWindow,
+			windowTTL: s.windowTTL,
+			halfLife:  s.halfLife,
+		}
+		s.entries[host] = e
 	}
-	return b
+	return e
 }
 
 // hostOf extracts the host (authority) from a raw URL string.
 func hostOf(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parse URL %q: %w", rawURL, err)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("URL %q has no host", rawURL)
 	}
 	return u.Host, nil
 }

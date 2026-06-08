@@ -15,10 +15,12 @@ const (
 	defaultOllamaModel   = "llama3"
 )
 
-// OllamaChecker is a Tier-2 quality checker that runs a local LLM via Ollama.
-// It uses the same prompt and result schema as LLMChecker so scores are
-// directly comparable. Prefer this when you want zero API cost and don't
-// mind slightly lower accuracy than Claude.
+// OllamaChecker is a TierLLM quality checker that runs a local model via
+// Ollama's /api/chat endpoint. It uses the same dual-view prompt and result
+// schema as LLMChecker (Claude) so scores are directly comparable.
+//
+// Prefer this when you want zero API cost and don't mind slightly lower
+// accuracy than a hosted frontier model.
 type OllamaChecker struct {
 	baseURL    string
 	model      string
@@ -33,7 +35,7 @@ func WithOllamaBaseURL(url string) OllamaOption {
 }
 
 // WithOllamaModel overrides the default model (llama3).
-// Good alternatives: mistral, phi3, gemma2, qwen2.
+// Good alternatives: mistral, phi3, gemma2, qwen2, deepseek-r1.
 func WithOllamaModel(model string) OllamaOption {
 	return func(o *OllamaChecker) { o.model = model }
 }
@@ -60,66 +62,111 @@ func NewOllamaChecker(opts ...OllamaOption) *OllamaChecker {
 
 func (o *OllamaChecker) Tier() Tier { return TierLLM }
 
-// ollamaRequest maps to the Ollama /api/generate endpoint.
-type ollamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"` // false → single JSON response
-	// Ask the model to respond only in JSON.
-	Format string `json:"format"`
+// ollamaChatRequest maps to the Ollama /api/chat endpoint.
+// We use /api/chat instead of /api/generate because it supports
+// the "format" field for structured JSON output more reliably.
+type ollamaChatRequest struct {
+	Model    string              `json:"model"`
+	Messages []ollamaChatMessage `json:"messages"`
+	Stream   bool                `json:"stream"`
+	Format   map[string]any      `json:"format,omitempty"` // JSON schema for structured output
+	Options  map[string]any      `json:"options,omitempty"`
 }
 
-// ollamaResponse is the non-streaming response from /api/generate.
-type ollamaResponse struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
-	Error    string `json:"error,omitempty"`
+type ollamaChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ollamaChatResponse is the non-streaming response from /api/chat.
+type ollamaChatResponse struct {
+	Message ollamaChatMessage `json:"message"`
+	Done    bool              `json:"done"`
+	Error   string            `json:"error,omitempty"`
 }
 
 func (o *OllamaChecker) Check(ctx context.Context, rs *FetchResult) (QualityResult, error) {
-	snippet := string(rs.RawBody)
-	if len(snippet) > llmSnippetBytes {
-		snippet = snippet[:llmSnippetBytes]
+	rawSnippet := string(rs.RawBody)
+	if len(rawSnippet) > llmRawSnippetBytes {
+		rawSnippet = rawSnippet[:llmRawSnippetBytes]
 	}
 
-	prompt := `You are an HTML quality evaluator for a web crawler.
-Analyse the HTML snippet and return ONLY a valid JSON object — no prose, no markdown fences, no explanation.
+	readableSnippet := string(rs.ReadableBody)
+	if len(readableSnippet) > llmReadableSnippetBytes {
+		readableSnippet = readableSnippet[:llmReadableSnippetBytes]
+	}
 
-Required JSON schema:
+	systemMsg := `You are an HTML quality evaluator for a web crawler.
+You receive two views of the same page:
+1. RAW HTML SNIPPET — the first ~3 KB of the raw HTML.
+2. READABLE BODY — text extracted by a readability library.
+
+Return ONLY a valid JSON object matching this exact schema — no prose, no markdown fences:
 {
   "score": <float 0.0-1.0>,
   "is_js_wall": <bool>,
   "is_error_page": <bool>,
+  "is_login_wall": <bool>,
   "word_count": <int>,
+  "content_type": <"article"|"listing"|"spa"|"error"|"other">,
   "summary": "<one sentence>",
   "signals": ["<observation>"],
   "recommended": "<http|browser>"
 }
 
 Scoring guide:
-  1.0 = rich, complete content in raw HTML
-  0.7 = decent content, could be richer
-  0.5 = partial content, JS rendering may help
-  0.3 = mostly JS shell
-  0.0 = error page or completely empty
+  1.0 = rich content fully in readable body
+  0.8 = good article content
+  0.6 = partial content
+  0.4 = thin content
+  0.2 = mostly JS shell
+  0.0 = error/login/empty
 
-HTML snippet:
-` + snippet + `
+Rules:
+- readable body ≥ 200 words → score ≥ 0.7
+- readable body < 30 words but large raw HTML → is_js_wall=true, score ≤ 0.3
+- recommend "browser" when is_js_wall=true or is_login_wall=true or score < 0.5`
 
-Respond with JSON only:`
+	userMsg := fmt.Sprintf("RAW HTML SNIPPET:\n%s\n\nREADABLE BODY:\n%s",
+		rawSnippet, readableSnippet)
 
-	payload, err := json.Marshal(ollamaRequest{
-		Model:  o.model,
-		Prompt: prompt,
+	// JSON schema for structured output (Ollama ≥ 0.5 supports this).
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"score":         map[string]any{"type": "number"},
+			"is_js_wall":    map[string]any{"type": "boolean"},
+			"is_error_page": map[string]any{"type": "boolean"},
+			"is_login_wall": map[string]any{"type": "boolean"},
+			"word_count":    map[string]any{"type": "integer"},
+			"content_type":  map[string]any{"type": "string"},
+			"summary":       map[string]any{"type": "string"},
+			"signals":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"recommended":   map[string]any{"type": "string"},
+		},
+		"required": []string{"score", "is_js_wall", "is_error_page", "is_login_wall",
+			"word_count", "content_type", "summary", "signals", "recommended"},
+	}
+
+	payload, err := json.Marshal(ollamaChatRequest{
+		Model: o.model,
+		Messages: []ollamaChatMessage{
+			{Role: "system", Content: systemMsg},
+			{Role: "user", Content: userMsg},
+		},
 		Stream: false,
-		Format: "json",
+		Format: schema,
+		Options: map[string]any{
+			"temperature": 0,   // deterministic output
+			"num_predict": 512, // cap response length
+		},
 	})
 	if err != nil {
 		return QualityResult{}, fmt.Errorf("marshal ollama request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		o.baseURL+"/api/generate", bytes.NewReader(payload))
+		o.baseURL+"/api/chat", bytes.NewReader(payload))
 	if err != nil {
 		return QualityResult{}, fmt.Errorf("build ollama request: %w", err)
 	}
@@ -135,7 +182,7 @@ Respond with JSON only:`
 		return QualityResult{}, fmt.Errorf("ollama returned %s", resp.Status)
 	}
 
-	var raw ollamaResponse
+	var raw ollamaChatResponse
 	if err = json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return QualityResult{}, fmt.Errorf("decode ollama response: %w", err)
 	}
@@ -143,39 +190,15 @@ Respond with JSON only:`
 		return QualityResult{}, fmt.Errorf("ollama error: %s", raw.Error)
 	}
 
-	// Sanitise: strip accidental fences some models emit despite format:"json".
-	text := strings.TrimSpace(raw.Response)
-	text = strings.TrimPrefix(text, "```json")
-	text = strings.TrimPrefix(text, "```")
-	text = strings.TrimSuffix(text, "```")
-	text = strings.TrimSpace(text)
+	text := cleanJSON(raw.Message.Content)
 
 	var verdict llmVerdict
 	if err = json.Unmarshal([]byte(text), &verdict); err != nil {
 		return QualityResult{}, fmt.Errorf("parse ollama json (%q): %w", text, err)
 	}
 
-	recommended := MethodHTTP
-	if strings.ToLower(verdict.Recommended) == "browser" || verdict.IsJSWall {
-		recommended = MethodBrowser
-	}
-
-	signals := map[string]float64{"score": verdict.Score}
-	if verdict.IsJSWall {
-		signals["is_js_wall"] = 1
-	}
-	if verdict.IsErrorPage {
-		signals["is_error_page"] = 1
-	}
-
-	return QualityResult{
-		Score:       clamp(verdict.Score),
-		Confidence:  ConfidenceHigh,
-		Signals:     signals,
-		Recommended: recommended,
-		Reason:      fmt.Sprintf("ollama(%s): %s", o.model, verdict.Summary),
-		Tier:        TierLLM,
-	}, nil
+	result := verdictToResult(verdict, fmt.Sprintf("ollama/%s", o.model))
+	return result, nil
 }
 
 // Ping checks whether the Ollama server is reachable and the chosen model
@@ -202,7 +225,7 @@ func (o *OllamaChecker) Ping(ctx context.Context) error {
 	}
 
 	for _, m := range body.Models {
-		// Ollama stores models as "llama3:latest", match prefix.
+		// Ollama stores models as "llama3:latest"; match prefix.
 		if strings.HasPrefix(m.Name, o.model) {
 			return nil
 		}
