@@ -77,7 +77,7 @@ func WithProbeConcurrency(n int) ProberOption {
 //   - Graceful stop waits for the current scan batch to complete.
 type Prober struct {
 	cfg      ProberConfig
-	store    *ScoreStore
+	store    Store
 	checkers []Checker
 	fetcher  rawFetcher
 	log      *slog.Logger
@@ -104,7 +104,7 @@ func NewProber(c *Client, opts ...ProberOption) *Prober {
 	return newProber(cfg, c.store, c.pipeline.checkers, c, c.log)
 }
 
-func newProber(cfg ProberConfig, store *ScoreStore, checkers []Checker, f rawFetcher, log *slog.Logger) *Prober {
+func newProber(cfg ProberConfig, store Store, checkers []Checker, f rawFetcher, log *slog.Logger) *Prober {
 	return &Prober{
 		cfg:      cfg,
 		store:    store,

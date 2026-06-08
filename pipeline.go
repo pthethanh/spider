@@ -21,6 +21,18 @@ type upgradeJob struct {
 	enqueuedAt  time.Time
 }
 
+type Store interface {
+	Delete(host string)
+	Evict()
+	Get(host string) (QualityResult, bool)
+	Len() int
+	ProbeCandidates() []ProbeCandidate
+	RecordProbeResult(host string, success bool, baseInterval time.Duration)
+	ScheduleProbe(host string, interval time.Duration)
+	SetLastURL(host string, rawURL string)
+	Update(host string, result QualityResult)
+}
+
 // Pipeline manages a pool of background workers that run higher-tier checkers
 // and update the ScoreStore. Callers are never blocked — if the queue is full
 // the job is dropped and a warning is logged.
@@ -33,7 +45,7 @@ type upgradeJob struct {
 //   - Graceful drain on Close() with a configurable deadline.
 type Pipeline struct {
 	checkers   []Checker // ordered lowest → highest tier
-	store      *ScoreStore
+	store      Store
 	jobs       chan upgradeJob
 	wg         sync.WaitGroup
 	log        *slog.Logger
@@ -58,7 +70,7 @@ func WithPipelineQueueSize(n int) PipelineOption {
 	return func(p *Pipeline) { p.jobs = make(chan upgradeJob, n) }
 }
 
-func NewPipeline(store *ScoreStore, checkers []Checker, workers int, log *slog.Logger, opts ...PipelineOption) *Pipeline {
+func NewPipeline(store Store, checkers []Checker, workers int, log *slog.Logger, opts ...PipelineOption) *Pipeline {
 	p := &Pipeline{
 		checkers:   checkers,
 		store:      store,

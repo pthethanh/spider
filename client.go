@@ -61,7 +61,7 @@ type Client struct {
 	timeout        time.Duration
 	browserTimeout time.Duration
 
-	store    *ScoreStore
+	store    Store
 	pipeline *Pipeline
 	checker  Checker
 
@@ -108,7 +108,7 @@ func WithLogger(log *slog.Logger) Option {
 }
 
 // WithScoreStore replaces the default ScoreStore.
-func WithScoreStore(store *ScoreStore) Option {
+func WithScoreStore(store Store) Option {
 	return func(c *Client) { c.store = store }
 }
 
@@ -423,12 +423,12 @@ func (c *Client) browserFetch(ctx context.Context, endpoint string) ([]byte, err
 	if err = page.Context(ctx).Navigate(endpoint); err != nil {
 		return nil, fmt.Errorf("navigate to %s: %w", endpoint, err)
 	}
-	//prePageLoadSetup(endpoint, page)
+	prePageLoadSetup(endpoint, page)
 	if err = page.Context(ctx).WaitLoad(); err != nil {
 		// WaitLoad timeout is non-fatal — the page may still have usable content.
 		c.log.Warn("browser WaitLoad timed out", "endpoint", endpoint, "err", err)
 	}
-	//postPageLoadSetup(page)
+	postPageLoadSetup(page)
 	htmlStr, err := page.HTML()
 	if err != nil {
 		return nil, fmt.Errorf("read HTML from %s: %w", endpoint, err)
