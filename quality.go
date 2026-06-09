@@ -33,8 +33,9 @@ func (t Tier) String() string {
 type FetchMethod int
 
 const (
-	MethodHTTP    FetchMethod = iota // plain HTTP is sufficient
-	MethodBrowser                    // headless browser required
+	MethodAuto    FetchMethod = iota
+	MethodHTTP                // plain HTTP is sufficient
+	MethodBrowser             // headless browser required
 )
 
 func (m FetchMethod) String() string {
@@ -158,17 +159,4 @@ func visibleTextRatio(rawHTML string) float64 {
 	}
 	text := extractVisibleText(rawHTML)
 	return clamp(float64(utf8.RuneCountInString(text)) / float64(len(rawHTML)))
-}
-
-func describeScore(score float64) string {
-	switch {
-	case score >= 0.8:
-		return "excellent – plain HTTP sufficient"
-	case score >= 0.6:
-		return "good – plain HTTP likely sufficient"
-	case score >= 0.4:
-		return "mediocre – consider headless browser"
-	default:
-		return "poor – headless browser recommended"
-	}
 }

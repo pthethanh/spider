@@ -165,21 +165,26 @@ func New(options ...Option) (*Client, error) {
 //  4. Runs the HeuristicChecker inline to produce an immediate score.
 //  5. If the result is uncertain, enqueues a non-blocking background upgrade.
 //  6. Returns both bodies and the pre-fetch cached score.
-func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, error) {
+func (c *Client) Fetch(ctx context.Context, endpoint string, fetchMethod ...FetchMethod) (*FetchResult, error) {
 	host, err := hostOf(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse endpoint %q: %w", endpoint, err)
 	}
 
-	// 1. Look up cached score.
-	cached, hasCached := c.store.Get(host)
-
-	// 2. Choose method from cache; default to HTTP on first visit.
-	method := MethodHTTP
-	if hasCached && cached.Recommended == MethodBrowser {
-		method = MethodBrowser
+	method := MethodAuto
+	if len(fetchMethod) > 0 {
+		method = fetchMethod[0]
 	}
+	if method == MethodAuto {
+		// 1. Look up cached score.
+		cached, hasCached := c.store.Get(host)
 
+		// 2. Choose method from cache; default to HTTP on first visit.
+		method = MethodHTTP
+		if hasCached && cached.Recommended == MethodBrowser {
+			method = MethodBrowser
+		}
+	}
 	// 3. Fetch with automatic HTTP→browser fallback.
 	rs, method, err := c.fetchWithFallback(ctx, endpoint, method)
 	if err != nil {
@@ -213,12 +218,6 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 		"status_code", rs.StatusCode,
 		"raw_bytes", len(rs.RawBody),
 		"readable_bytes", len(rs.ReadableBody),
-		"cached_score", func() any {
-			if hasCached {
-				return fmt.Sprintf("%.2f", cached.Score)
-			}
-			return "(none)"
-		}(),
 		"inline_score", func() any {
 			if checkErr != nil {
 				return fmt.Sprintf("err: %v", checkErr)
@@ -228,19 +227,11 @@ func (c *Client) Fetch(ctx context.Context, endpoint string) (*FetchResult, erro
 		"reason", inlineResult.Reason,
 	)
 
-	// Return the pre-fetch cached score so the caller knows what we knew
-	// before this fetch influenced the store.
-	var score *QualityResult
-	if hasCached {
-		q := cached
-		score = &q
-	}
-
 	return &FetchResult{
 		RawBody:      rs.RawBody,
 		ReadableBody: rs.ReadableBody,
 		Method:       method,
-		Score:        score,
+		Score:        rs.Score,
 		Endpoint:     endpoint,
 		StatusCode:   rs.StatusCode,
 		FetchedAt:    time.Now(),
